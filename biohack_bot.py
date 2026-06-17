@@ -874,7 +874,10 @@ def publish_vocal(article, content_html):
 # ---------------------------------------------------------------------------
 # SECTION 13 — STATE UPDATE
 # ---------------------------------------------------------------------------
-def update_state(medium_url, substack_url, vocal_url, keyword, title):
+def update_state(medium_url, substack_url, vocal_url, keyword, title, published_ok):
+    """Always log the attempt for debugging, but only consume the daily
+    quota (posts_today) when at least one platform actually published.
+    This prevents 'ghost posts' from silently eating the day's slot."""
     state = _read_state()
     today = _today_iso()
     state.setdefault("posts_log", []).append({
@@ -884,8 +887,18 @@ def update_state(medium_url, substack_url, vocal_url, keyword, title):
         "medium_url": medium_url or "",
         "substack_url": substack_url or "",
         "vocal_url": vocal_url or "",
+        "published": published_ok,
     })
-    state.setdefault("posts_today", []).append(today)
+    if published_ok:
+        state.setdefault("posts_today", []).append(today)
+    else:
+        # Free the keyword back up so a failed attempt doesn't burn it
+        # permanently from the rotation.
+        used = _read_used()
+        if keyword in used:
+            used.remove(keyword)
+            with open(USED_KEYWORDS_FILE, "w", encoding="utf-8") as f:
+                f.write("\n".join(used) + ("\n" if used else ""))
     _write_state(state)
 
 
@@ -961,16 +974,22 @@ def main():
     substack_url = publish_substack(article, content_html)
     vocal_url    = publish_vocal(article, content_html)
 
-    update_state(medium_url, substack_url, vocal_url, keyword, article["title"])
+    published_ok = any([medium_url, substack_url, vocal_url])
+    update_state(medium_url, substack_url, vocal_url, keyword, article["title"], published_ok)
 
     print("\n" + "=" * 55)
-    print("SUCCESS")
+    print("SUCCESS" if published_ok else "FAILED — nothing was actually published")
     print(f"Title    : {article['title']}")
     print(f"Keyword  : {keyword}")
-    print(f"Medium   : {medium_url or 'skipped'}")
-    print(f"Substack : {substack_url or 'skipped'}")
-    print(f"Vocal    : {vocal_url or 'skipped'}")
+    print(f"Medium   : {medium_url or 'FAILED/skipped'}")
+    print(f"Substack : {substack_url or 'FAILED/skipped'}")
+    print(f"Vocal    : {vocal_url or 'FAILED/skipped'}")
     print("=" * 55)
+
+    if not published_ok:
+        # Non-zero exit makes the GitHub Actions run show as failed/red,
+        # instead of silently reporting success while posting nothing.
+        exit(1)
 
 
 if __name__ == "__main__":
